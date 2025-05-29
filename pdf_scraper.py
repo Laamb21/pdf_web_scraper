@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup  # For parsing HTML content
 from urllib.parse import urljoin, urlparse  # For URL manipulation and parsing
 from tqdm import tqdm  # For progress bar visualization
 import logging  # For logging operations and errors
+from pdf_accessibility import PDFAccessibilityChecker, generate_report
 
 class PDFScraper:
     """
@@ -108,6 +109,15 @@ class PDFScraper:
             self.downloaded_pdfs.add(pdf_url)
             self.logger.info(f"Successfully downloaded: {pdf_name}")
             
+            # Check accessibility after download
+            if hasattr(self, 'check_accessibility') and self.check_accessibility:
+                checker = PDFAccessibilityChecker(self.output_dir)
+                result = checker.check_single_pdf(pdf_path)
+                if not result['is_compliant']:
+                    self.logger.warning(f"{pdf_name} is not 508 compliant")
+                    for issue in result.get('issues', []):
+                        self.logger.warning(f"- {issue['rule']}: {issue['description']}")
+            
         except Exception as e:
             self.logger.error(f"Error downloading PDF from {pdf_url}: {str(e)}")
 
@@ -166,6 +176,9 @@ def main():
     parser.add_argument('--output-dir', default='downloads', help='Directory to save PDFs')
     parser.add_argument('--max-depth', type=int, default=2, help='Maximum crawling depth')
     parser.add_argument('--timeout', type=int, default=30, help='Request timeout in seconds')
+    parser.add_argument('--check-508', action='store_true', help='Check PDFs for 508 compliance')
+    parser.add_argument('--accessibility-report', default='accessibility_report.txt',
+                      help='Output file for accessibility report')
     
     args = parser.parse_args()
     
@@ -177,10 +190,21 @@ def main():
         timeout=args.timeout
     )
     
+    # Add accessibility checking flag
+    scraper.check_accessibility = args.check_508
+    
     # Start the scraping process
     print(f"Starting to scrape PDFs from {args.url}")
     scraper.scrape_page(args.url)
     print(f"\nScraping completed! PDFs have been saved to: {args.output_dir}")
+    
+    # Generate accessibility report if requested
+    if args.check_508:
+        print("\nChecking downloaded PDFs for 508 compliance...")
+        checker = PDFAccessibilityChecker(args.output_dir)
+        results = checker.check_directory()
+        generate_report(results, args.accessibility_report)
+        print(f"Accessibility report generated: {args.accessibility_report}")
 
 if __name__ == "__main__":
     main() 
