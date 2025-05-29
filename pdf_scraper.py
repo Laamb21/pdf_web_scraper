@@ -9,6 +9,8 @@ from urllib.parse import urljoin, urlparse  # For URL manipulation and parsing
 from tqdm import tqdm  # For progress bar visualization
 import logging  # For logging operations and errors
 from pdf_accessibility import PDFAccessibilityChecker, generate_report
+from urllib.robotparser import RobotFileParser
+import time
 
 class PDFScraper:
     """
@@ -43,6 +45,52 @@ class PDFScraper:
         )
         self.logger = logging.getLogger(__name__)
 
+        # Set up robots.txt parser
+        self.rp = RobotFileParser()
+        self.setup_robots_parser()
+
+    def setup_robots_parser(self):
+        """Initialize and fetch robots.txt rules."""
+        try:
+            # Get the base URL's robots.txt
+            parsed_url = urlparse(self.base_url)
+            robots_url = f"{parsed_url.scheme}://{parsed_url.netloc}/robots.txt"
+            self.rp.set_url(robots_url)
+            self.rp.read()
+            self.logger.info(f"Successfully read robots.txt from {robots_url}")
+        except Exception as e:
+            self.logger.warning(f"Could not fetch robots.txt: {str(e)}")
+            # If we can't fetch robots.txt, we'll assume conservative crawling rules
+            self.rp = None
+
+    def can_fetch(self, url):
+        """Check if we're allowed to fetch a URL according to robots.txt."""
+        try:
+            if self.rp is None:
+                # If we couldn't fetch robots.txt, use conservative delay
+                time.sleep(1)  # Conservative 1 second delay
+                return True
+            
+            # Use 'Python-PDFScraper' as the user agent
+            can_fetch = self.rp.can_fetch("Python-PDFScraper", url)
+            
+            # Respect crawl delay if specified
+            crawl_delay = self.rp.crawl_delay("Python-PDFScraper")
+            if crawl_delay is not None:
+                time.sleep(crawl_delay)
+            else:
+                # Use conservative delay if none specified
+                time.sleep(1)
+            
+            if not can_fetch:
+                self.logger.warning(f"robots.txt disallows accessing: {url}")
+            
+            return can_fetch
+        except Exception as e:
+            self.logger.error(f"Error checking robots.txt for {url}: {str(e)}")
+            time.sleep(1)  # Conservative delay on error
+            return True
+
     def is_valid_url(self, url):
         """
         Check if a URL belongs to the same domain as the base URL.
@@ -72,6 +120,11 @@ class PDFScraper:
         - Error handling and logging
         """
         try:
+            # Check robots.txt before downloading
+            if not self.can_fetch(pdf_url):
+                self.logger.warning(f"Skipping {pdf_url} as per robots.txt rules")
+                return
+
             # Extract the filename from the URL path
             pdf_name = os.path.basename(urlparse(pdf_url).path)
             if not pdf_name.endswith('.pdf'):
@@ -86,6 +139,7 @@ class PDFScraper:
                 return
             
             # Start the download with streaming enabled for large files
+            self.logger.info(f"Downloading: {pdf_name}")
             response = requests.get(pdf_url, stream=True, timeout=self.timeout)
             response.raise_for_status()  # Raise an exception for bad status codes
             
@@ -93,7 +147,6 @@ class PDFScraper:
             total_size = int(response.headers.get('content-length', 0))
             
             # Download the file with progress tracking
-            self.logger.info(f"Downloading: {pdf_name}")
             with open(pdf_path, 'wb') as pdf_file, tqdm(
                 desc=pdf_name,
                 total=total_size,
@@ -135,6 +188,11 @@ class PDFScraper:
         - Downloads PDFs when found
         - Recursively crawls valid pages
         """
+        # Check robots.txt before scraping
+        if not self.can_fetch(url):
+            self.logger.warning(f"Skipping {url} as per robots.txt rules")
+            return
+        
         # Stop if we've reached max depth or already visited this URL
         if depth > self.max_depth or url in self.visited_urls:
             return
@@ -143,6 +201,7 @@ class PDFScraper:
         
         try:
             # Get and parse the page content
+            self.logger.info(f"Scraping page: {url}")
             response = requests.get(url, timeout=self.timeout)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -179,6 +238,8 @@ def main():
     parser.add_argument('--check-508', action='store_true', help='Check PDFs for 508 compliance')
     parser.add_argument('--accessibility-report', default='accessibility_report.txt',
                       help='Output file for accessibility report')
+    parser.add_argument('--respect-robots', action='store_true', default=True,
+                      help='Respect robots.txt rules (default: True)')
     
     args = parser.parse_args()
     
