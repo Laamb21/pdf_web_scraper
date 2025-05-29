@@ -33,4 +33,5 @@ ENV/
 
 # Project specific
 downloads/
-*.log 
+*.log
+accessibility_report.txt 

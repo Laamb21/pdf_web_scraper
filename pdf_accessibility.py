@@ -3,13 +3,17 @@
 import os
 from typing import Dict, List, Optional
 from PyPDF2 import PdfReader
-from pdf_accessibility_checker.checker import AccessibilityChecker
-from pdf_accessibility_checker.rules import Rule
+from pdfminer.high_level import extract_text
+from pdfminer.layout import LAParams, LTTextBox, LTImage
+from pdfminer.pdfpage import PDFPage
+from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
+from pdfminer.converter import PDFPageAggregator
+import io
 import logging
 
 class PDFAccessibilityChecker:
     """
-    A class to check PDF files for Section 508 compliance.
+    A class to check PDF files for Section 508 compliance using PyPDF2 and pdfminer.six.
     """
     
     def __init__(self, pdf_directory: str):
@@ -21,7 +25,7 @@ class PDFAccessibilityChecker:
         """
         self.pdf_directory = pdf_directory
         self.logger = logging.getLogger(__name__)
-        
+    
     def check_single_pdf(self, pdf_path: str) -> Dict:
         """
         Check a single PDF file for accessibility compliance.
@@ -33,33 +37,21 @@ class PDFAccessibilityChecker:
             Dict: Results of accessibility checks
         """
         try:
-            # Initialize the accessibility checker
-            checker = AccessibilityChecker()
-            
-            # Read the PDF
+            # Read the PDF using PyPDF2
             pdf = PdfReader(pdf_path)
             
+            # Initialize results
             results = {
                 'filename': os.path.basename(pdf_path),
                 'is_compliant': True,
                 'issues': [],
                 'metadata': self._check_metadata(pdf),
                 'structure': self._check_structure(pdf),
-                'text': self._check_text_accessibility(pdf)
+                'text': self._check_text_accessibility(pdf_path)
             }
             
-            # Run the accessibility checker
-            checker_results = checker.check(pdf_path)
-            
-            # Process results
-            for rule, rule_result in checker_results.items():
-                if not rule_result.passed:
-                    results['is_compliant'] = False
-                    results['issues'].append({
-                        'rule': rule,
-                        'description': rule_result.message,
-                        'severity': rule_result.severity
-                    })
+            # Check for common accessibility issues
+            self._check_accessibility_issues(pdf, results)
             
             return results
             
@@ -70,6 +62,43 @@ class PDFAccessibilityChecker:
                 'is_compliant': False,
                 'error': str(e)
             }
+    
+    def _check_accessibility_issues(self, pdf: PdfReader, results: Dict):
+        """Check for various accessibility issues and update results."""
+        # Check for basic requirements
+        if not results['metadata']['has_title']:
+            self._add_issue(results, 'Missing Title', 'Document lacks a title', 'High')
+        
+        if not results['metadata']['has_language']:
+            self._add_issue(results, 'Missing Language', 'Document language not specified', 'High')
+        
+        if not results['structure']['has_bookmarks'] and results['structure']['total_pages'] > 20:
+            self._add_issue(results, 'Missing Bookmarks', 
+                          'Large document lacks bookmarks for navigation', 'Medium')
+        
+        if not results['text']['has_text']:
+            self._add_issue(results, 'No Extractable Text', 
+                          'Document may be image-only without OCR', 'High')
+        
+        # Check text quality
+        if results['text']['text_quality'] == 'poor':
+            self._add_issue(results, 'Poor Text Quality', 
+                          'Text content may be difficult to extract or read', 'Medium')
+        
+        # Check for images without alternative text
+        if results['text']['images_without_alt_text'] > 0:
+            self._add_issue(results, 'Missing Alt Text',
+                          f'Found {results["text"]["images_without_alt_text"]} images without alternative text',
+                          'High')
+    
+    def _add_issue(self, results: Dict, rule: str, description: str, severity: str):
+        """Add an issue to the results and mark as non-compliant."""
+        results['is_compliant'] = False
+        results['issues'].append({
+            'rule': rule,
+            'description': description,
+            'severity': severity
+        })
     
     def check_directory(self) -> List[Dict]:
         """
@@ -111,51 +140,85 @@ class PDFAccessibilityChecker:
         return {
             'has_bookmarks': len(pdf.outline) > 0,
             'total_pages': len(pdf.pages),
-            'has_tags': pdf.is_encrypted
+            'has_tags': '/StructTreeRoot' in pdf.trailer['/Root']
+            if '/Root' in pdf.trailer else False
         }
     
-    def _check_text_accessibility(self, pdf: PdfReader) -> Dict:
-        """Check text accessibility features."""
+    def _check_text_accessibility(self, pdf_path: str) -> Dict:
+        """
+        Check text accessibility features using pdfminer.six for more detailed analysis.
+        """
         results = {
             'has_text': False,
             'has_ocr': False,
-            'text_quality': 'unknown'
+            'text_quality': 'unknown',
+            'images_without_alt_text': 0,
+            'reading_order': 'unknown'
         }
         
         try:
-            # Check first page for text
-            page = pdf.pages[0]
-            text = page.extract_text()
+            # Extract text using pdfminer
+            text = extract_text(pdf_path)
             results['has_text'] = bool(text.strip())
             
-            # Basic OCR detection (presence of text when there's also images)
-            if '/XObject' in page and results['has_text']:
-                results['has_ocr'] = True
-            
-            # Rough text quality assessment
+            # Analyze text quality
             if results['has_text']:
                 text_length = len(text)
-                if text_length > 100:
+                if text_length > 1000:
                     results['text_quality'] = 'good'
-                elif text_length > 20:
+                elif text_length > 100:
                     results['text_quality'] = 'fair'
                 else:
                     results['text_quality'] = 'poor'
-        
+            
+            # Check for images and their properties
+            rsrcmgr = PDFResourceManager()
+            laparams = LAParams()
+            device = PDFPageAggregator(rsrcmgr, laparams=laparams)
+            interpreter = PDFPageInterpreter(rsrcmgr, device)
+            
+            with open(pdf_path, 'rb') as file:
+                for page in PDFPage.get_pages(file):
+                    interpreter.process_page(page)
+                    layout = device.get_result()
+                    
+                    # Count images without alternative text
+                    for element in layout:
+                        if isinstance(element, LTImage):
+                            # Check if image has associated text nearby
+                            has_alt_text = False
+                            for text_elem in layout:
+                                if isinstance(text_elem, LTTextBox):
+                                    if self._is_near_image(element, text_elem):
+                                        has_alt_text = True
+                                        break
+                            
+                            if not has_alt_text:
+                                results['images_without_alt_text'] += 1
+            
+            # Detect possible OCR
+            if results['has_text'] and results['images_without_alt_text'] > 0:
+                results['has_ocr'] = True
+            
         except Exception as e:
             self.logger.error(f"Error checking text accessibility: {str(e)}")
         
         return results
+    
+    def _is_near_image(self, image, text_elem, threshold=50):
+        """Check if text element is near an image (potential alt text)."""
+        image_bbox = image.bbox
+        text_bbox = text_elem.bbox
+        
+        # Check if text is above, below, or beside the image within threshold
+        return (abs(image_bbox[1] - text_bbox[3]) < threshold or  # text above
+                abs(image_bbox[3] - text_bbox[1]) < threshold or  # text below
+                abs(image_bbox[0] - text_bbox[2]) < threshold or  # text left
+                abs(image_bbox[2] - text_bbox[0]) < threshold)    # text right
 
 def generate_report(results: List[Dict], output_file: str = "accessibility_report.txt"):
-    """
-    Generate a detailed accessibility report.
-    
-    Args:
-        results (List[Dict]): Results from PDF checks
-        output_file (str): Path to save the report
-    """
-    with open(output_file, 'w') as f:
+    """Generate a detailed accessibility report."""
+    with open(output_file, 'w', encoding='utf-8') as f:
         f.write("PDF Accessibility Compliance Report\n")
         f.write("================================\n\n")
         
@@ -175,7 +238,7 @@ def generate_report(results: List[Dict], output_file: str = "accessibility_repor
                 f.write(f"Error: {result['error']}\n")
                 continue
                 
-            f.write(f"Compliance Status: {'✓ Compliant' if result['is_compliant'] else '✗ Non-compliant'}\n\n")
+            f.write(f"Compliance Status: {'[PASS] Compliant' if result['is_compliant'] else '[FAIL] Non-compliant'}\n\n")
             
             if not result['is_compliant'] and 'issues' in result:
                 f.write("Issues Found:\n")
@@ -186,12 +249,15 @@ def generate_report(results: List[Dict], output_file: str = "accessibility_repor
             if 'metadata' in result:
                 f.write("\nMetadata:\n")
                 for key, value in result['metadata'].items():
-                    f.write(f"- {key}: {'✓' if value else '✗'}\n")
+                    f.write(f"- {key}: {'[YES]' if value else '[NO]'}\n")
             
             if 'structure' in result:
                 f.write("\nStructure:\n")
                 for key, value in result['structure'].items():
-                    f.write(f"- {key}: {'✓' if value else '✗'}\n")
+                    if key == 'total_pages':
+                        f.write(f"- {key}: {value}\n")
+                    else:
+                        f.write(f"- {key}: {'[YES]' if value else '[NO]'}\n")
             
             if 'text' in result:
                 f.write("\nText Accessibility:\n")
@@ -209,16 +275,12 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # Configure logging
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
     
-    # Run the checks
     checker = PDFAccessibilityChecker(args.dir)
     results = checker.check_directory()
-    
-    # Generate the report
     generate_report(results, args.report)
     print(f"\nAccessibility report generated: {args.report}") 
