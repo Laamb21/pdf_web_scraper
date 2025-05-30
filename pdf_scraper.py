@@ -11,6 +11,7 @@ import logging  # For logging operations and errors
 from pdf_accessibility import PDFAccessibilityChecker, generate_report
 from urllib.robotparser import RobotFileParser
 import time
+from typing import Optional
 
 class PDFScraper:
     """
@@ -34,6 +35,7 @@ class PDFScraper:
         self.timeout = timeout
         self.visited_urls = set()  # Keep track of URLs we've already visited
         self.downloaded_pdfs = set()  # Keep track of PDFs we've already downloaded
+        self.pdf_sources = {}  # Track the source URL of each downloaded PDF
         
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
@@ -106,24 +108,13 @@ class PDFScraper:
         url_domain = urlparse(url).netloc
         return base_domain in url_domain or not url_domain
 
-    def download_pdf(self, pdf_url):
-        """
-        Download a PDF file from the given URL with progress tracking.
-        
-        Args:
-            pdf_url (str): The URL of the PDF to download
-            
-        The function handles:
-        - Extracting filename from URL
-        - Skipping already downloaded files
-        - Showing download progress
-        - Error handling and logging
-        """
+    def download_pdf(self, pdf_url: str) -> Optional[str]:
+        """Download a PDF file and save it locally."""
         try:
             # Check robots.txt before downloading
             if not self.can_fetch(pdf_url):
                 self.logger.warning(f"Skipping {pdf_url} as per robots.txt rules")
-                return
+                return None
 
             # Extract the filename from the URL path
             pdf_name = os.path.basename(urlparse(pdf_url).path)
@@ -136,7 +127,7 @@ class PDFScraper:
             # Skip if we've already downloaded this PDF
             if pdf_url in self.downloaded_pdfs:
                 self.logger.info(f"Skipping already downloaded PDF: {pdf_name}")
-                return
+                return pdf_path
             
             # Start the download with streaming enabled for large files
             self.logger.info(f"Downloading: {pdf_name}")
@@ -171,8 +162,13 @@ class PDFScraper:
                     for issue in result.get('issues', []):
                         self.logger.warning(f"- {issue['rule']}: {issue['description']}")
             
+            # Save the source URL of the downloaded PDF
+            self.pdf_sources[pdf_name] = pdf_url
+            
+            return pdf_path
         except Exception as e:
             self.logger.error(f"Error downloading PDF from {pdf_url}: {str(e)}")
+            return None
 
     def scrape_page(self, url, depth=0):
         """
@@ -261,10 +257,14 @@ def main():
     
     # Generate accessibility report if requested
     if args.check_508:
-        print("\nChecking downloaded PDFs for 508 compliance...")
         checker = PDFAccessibilityChecker(args.output_dir)
-        results = checker.check_directory()
-        generate_report(results, args.accessibility_report, source_url=args.url)
+        results = []
+        pdf_files = [os.path.join(args.output_dir, pdf_name) for pdf_name in scraper.pdf_sources.keys()]
+        for pdf_file in pdf_files:
+            result = checker.check_single_pdf(pdf_file)
+            result['source_url'] = scraper.pdf_sources.get(os.path.basename(pdf_file), 'Unknown location')
+            results.append(result)
+        generate_report(results, args.accessibility_report)
         print(f"Accessibility report generated: {args.accessibility_report}")
 
 if __name__ == "__main__":

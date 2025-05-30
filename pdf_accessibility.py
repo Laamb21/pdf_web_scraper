@@ -217,7 +217,7 @@ class PDFAccessibilityChecker:
                 abs(image_bbox[0] - text_bbox[2]) < threshold or  # text left
                 abs(image_bbox[2] - text_bbox[0]) < threshold)    # text right
 
-def generate_report(results: List[Dict], output_file: str = "accessibility_report.txt", source_url: str = None):
+def generate_report(results: List[Dict], output_file: str = "accessibility_report.txt"):
     """Generate an accessibility report with summary statistics and compliance details."""
     total_pdfs = len(results)
     compliant_pdfs = sum(1 for result in results if result['is_compliant'])
@@ -228,8 +228,6 @@ def generate_report(results: List[Dict], output_file: str = "accessibility_repor
         # Write timestamp and summary statistics
         f.write("PDF Accessibility Compliance Report\n")
         f.write(f"Generated: {timestamp}\n")
-        if source_url:
-            f.write(f"Source URL: {source_url}\n")
         f.write("=====================================\n\n")
         f.write("Summary Statistics\n")
         f.write("-----------------\n")
@@ -242,9 +240,8 @@ def generate_report(results: List[Dict], output_file: str = "accessibility_repor
         # Write individual results
         for result in results:
             f.write(f"File: {result['filename']}\n")
-            # Check for both scraped_url and url keys to maintain compatibility
-            url = result.get('scraped_url') or result.get('url', 'Unknown location')
-            f.write(f"Source URL: {url}\n")
+            source_url = result.get('source_url', result.get('pdf_url', 'Unknown location'))
+            f.write(f"Source URL: {source_url}\n")
             f.write(f"Compliance Status: {'[PASS] Compliant' if result['is_compliant'] else '[FAIL] Non-compliant'}\n")
             f.write("\n" + "=" * 50 + "\n")
 
