@@ -27,41 +27,43 @@ class PDFAccessibilityChecker:
         self.pdf_directory = pdf_directory
         self.logger = logging.getLogger(__name__)
     
-    def check_single_pdf(self, pdf_path: str) -> Dict:
-        """
-        Check a single PDF file for accessibility compliance.
-        
-        Args:
-            pdf_path (str): Path to the PDF file
-            
-        Returns:
-            Dict: Results of accessibility checks
-        """
+    def check_single_pdf(self, pdf_path: str, source_url: str = None) -> Dict:
+        """Check a single PDF file for accessibility compliance."""
         try:
-            # Read the PDF using PyPDF2
-            pdf = PdfReader(pdf_path)
-            
-            # Initialize results
-            results = {
-                'filename': os.path.basename(pdf_path),
-                'is_compliant': True,
-                'issues': [],
-                'metadata': self._check_metadata(pdf),
-                'structure': self._check_structure(pdf),
-                'text': self._check_text_accessibility(pdf_path)
-            }
-            
-            # Check for common accessibility issues
-            self._check_accessibility_issues(pdf, results)
-            
-            return results
-            
+            # Read the PDF using PyPDF2 and get accurate page count
+            with open(pdf_path, 'rb') as file:
+                try:
+                    pdf = PdfReader(file)
+                    page_count = len(pdf.pages)
+                except Exception as e:
+                    self.logger.error(f"Error reading PDF pages: {str(e)}")
+                    page_count = 0
+
+                # Initialize results with URL and page count
+                results = {
+                    'filename': os.path.basename(pdf_path),
+                    'is_compliant': True,
+                    'issues': [],
+                    'metadata': self._check_metadata(pdf),
+                    'structure': self._check_structure(pdf),
+                    'text': self._check_text_accessibility(pdf_path),
+                    'page_count': page_count,  # Make sure page_count is included
+                    'source_url': source_url
+                }
+                
+                # Check for common accessibility issues
+                self._check_accessibility_issues(pdf, results)
+                
+                return results
+                
         except Exception as e:
             self.logger.error(f"Error checking PDF {pdf_path}: {str(e)}")
             return {
                 'filename': os.path.basename(pdf_path),
                 'is_compliant': False,
-                'error': str(e)
+                'error': str(e),
+                'page_count': 0,
+                'source_url': source_url
             }
     
     def _check_accessibility_issues(self, pdf: PdfReader, results: Dict):
@@ -217,7 +219,7 @@ class PDFAccessibilityChecker:
                 abs(image_bbox[0] - text_bbox[2]) < threshold or  # text left
                 abs(image_bbox[2] - text_bbox[0]) < threshold)    # text right
 
-def generate_report(results: List[Dict], output_file: str = "accessibility_report.txt"):
+def generate_report(results: List[Dict], output_file: str = "accessibility_report.txt", source_url: str = None):
     """Generate an accessibility report with summary statistics and compliance details."""
     total_pdfs = len(results)
     compliant_pdfs = sum(1 for result in results if result['is_compliant'])
@@ -228,6 +230,7 @@ def generate_report(results: List[Dict], output_file: str = "accessibility_repor
         # Write timestamp and summary statistics
         f.write("PDF Accessibility Compliance Report\n")
         f.write(f"Generated: {timestamp}\n")
+        f.write(f"Website URL: {source_url or 'Not specified'}\n")
         f.write("=====================================\n\n")
         f.write("Summary Statistics\n")
         f.write("-----------------\n")
@@ -243,6 +246,7 @@ def generate_report(results: List[Dict], output_file: str = "accessibility_repor
             source_url = result.get('source_url', result.get('pdf_url', 'Unknown location'))
             f.write(f"Source URL: {source_url}\n")
             f.write(f"Compliance Status: {'[PASS] Compliant' if result['is_compliant'] else '[FAIL] Non-compliant'}\n")
+            f.write(f"Pages: {result.get('page_count', 'Unknown')}\n")
             f.write("\n" + "=" * 50 + "\n")
 
 if __name__ == "__main__":
@@ -251,6 +255,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Check PDFs for 508 compliance')
     parser.add_argument('--dir', required=True, help='Directory containing PDFs to check')
     parser.add_argument('--report', default='accessibility_report.txt', help='Output report file')
+    parser.add_argument('--url', help='Website URL that was scraped')
     
     args = parser.parse_args()
     
@@ -261,5 +266,5 @@ if __name__ == "__main__":
     
     checker = PDFAccessibilityChecker(args.dir)
     results = checker.check_directory()
-    generate_report(results, args.report)
+    generate_report(results, args.report, args.url)
     print(f"\nAccessibility report generated: {args.report}")

@@ -259,12 +259,15 @@ def main():
     if args.check_508:
         checker = PDFAccessibilityChecker(args.output_dir)
         results = []
-        pdf_files = [os.path.join(args.output_dir, pdf_name) for pdf_name in scraper.pdf_sources.keys()]
-        for pdf_file in pdf_files:
-            result = checker.check_single_pdf(pdf_file)
-            result['source_url'] = scraper.pdf_sources.get(os.path.basename(pdf_file), 'Unknown location')
-            results.append(result)
-        generate_report(results, args.accessibility_report)
+        for pdf_file in os.listdir(args.output_dir):
+            if pdf_file.lower().endswith('.pdf'):
+                pdf_path = os.path.join(args.output_dir, pdf_file)
+                # Pass the source URL from the scraper's tracking
+                pdf_url = scraper.pdf_sources.get(pdf_file)
+                result = checker.check_single_pdf(pdf_path, source_url=pdf_url)
+                results.append(result)
+        
+        generate_report(results, args.accessibility_report, source_url=args.url)
         print(f"Accessibility report generated: {args.accessibility_report}")
 
 if __name__ == "__main__":
