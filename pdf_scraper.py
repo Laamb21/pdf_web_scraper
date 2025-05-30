@@ -264,8 +264,8 @@ def main():
         print("\nChecking downloaded PDFs for 508 compliance...")
         checker = PDFAccessibilityChecker(args.output_dir)
         results = checker.check_directory()
-        generate_report(results, args.accessibility_report)
+        generate_report(results, args.accessibility_report, source_url=args.url)
         print(f"Accessibility report generated: {args.accessibility_report}")
 
 if __name__ == "__main__":
-    main() 
+    main()
