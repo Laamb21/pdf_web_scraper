@@ -254,15 +254,14 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Check PDFs for 508 compliance')
     parser.add_argument('--dir', required=True, help='Directory containing PDFs to check')
-    parser.add_argument('--report', default='accessibility_report.txt', help='Output report file')
+    parser.add_argument('--report', help='Output report file (defaults to accessibility_report.txt in PDF directory)')
     parser.add_argument('--url', help='Website URL that was scraped')
     
     args = parser.parse_args()
     
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
+    # Set default report path to PDF directory
+    if not args.report:
+        args.report = os.path.join(args.dir, 'accessibility_report.txt')
     
     checker = PDFAccessibilityChecker(args.dir)
     results = checker.check_directory()

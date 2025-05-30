@@ -262,13 +262,14 @@ def main():
         for pdf_file in os.listdir(args.output_dir):
             if pdf_file.lower().endswith('.pdf'):
                 pdf_path = os.path.join(args.output_dir, pdf_file)
-                # Pass the source URL from the scraper's tracking
                 pdf_url = scraper.pdf_sources.get(pdf_file)
                 result = checker.check_single_pdf(pdf_path, source_url=pdf_url)
                 results.append(result)
         
-        generate_report(results, args.accessibility_report, source_url=args.url)
-        print(f"Accessibility report generated: {args.accessibility_report}")
+        # Create report path in the same directory as PDFs
+        report_path = os.path.join(args.output_dir, 'accessibility_report.txt')
+        generate_report(results, report_path, source_url=args.url)
+        print(f"Accessibility report generated: {report_path}")
 
 if __name__ == "__main__":
     main()
