@@ -10,6 +10,7 @@ from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
 from pdfminer.converter import PDFPageAggregator
 import io
 import logging
+from datetime import datetime
 
 class PDFAccessibilityChecker:
     """
@@ -217,53 +218,31 @@ class PDFAccessibilityChecker:
                 abs(image_bbox[2] - text_bbox[0]) < threshold)    # text right
 
 def generate_report(results: List[Dict], output_file: str = "accessibility_report.txt"):
-    """Generate a detailed accessibility report."""
+    """Generate an accessibility report with summary statistics and compliance details."""
+    total_pdfs = len(results)
+    compliant_pdfs = sum(1 for result in results if result['is_compliant'])
+    non_compliant_pdfs = total_pdfs - compliant_pdfs
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
     with open(output_file, 'w', encoding='utf-8') as f:
+        # Write timestamp and summary statistics
         f.write("PDF Accessibility Compliance Report\n")
-        f.write("================================\n\n")
+        f.write(f"Generated: {timestamp}\n")
+        f.write("=====================================\n\n")
+        f.write("Summary Statistics\n")
+        f.write("-----------------\n")
+        f.write(f"Total PDFs Found: {total_pdfs}\n")
+        f.write(f"508 Compliant: {compliant_pdfs}\n")
+        f.write(f"Non-compliant: {non_compliant_pdfs}\n")
+        f.write("\nDetailed Results\n")
+        f.write("---------------\n\n")
         
-        compliant_count = sum(1 for r in results if r.get('is_compliant'))
-        total_count = len(results)
-        
-        f.write(f"Summary:\n")
-        f.write(f"- Total PDFs checked: {total_count}\n")
-        f.write(f"- Compliant PDFs: {compliant_count}\n")
-        f.write(f"- Non-compliant PDFs: {total_count - compliant_count}\n\n")
-        
+        # Write individual results
         for result in results:
-            f.write(f"\nFile: {result['filename']}\n")
-            f.write("-" * (len(result['filename']) + 6) + "\n")
-            
-            if result.get('error'):
-                f.write(f"Error: {result['error']}\n")
-                continue
-                
-            f.write(f"Compliance Status: {'[PASS] Compliant' if result['is_compliant'] else '[FAIL] Non-compliant'}\n\n")
-            
-            if not result['is_compliant'] and 'issues' in result:
-                f.write("Issues Found:\n")
-                for issue in result['issues']:
-                    f.write(f"- {issue['rule']}: {issue['description']}\n")
-                    f.write(f"  Severity: {issue['severity']}\n")
-            
-            if 'metadata' in result:
-                f.write("\nMetadata:\n")
-                for key, value in result['metadata'].items():
-                    f.write(f"- {key}: {'[YES]' if value else '[NO]'}\n")
-            
-            if 'structure' in result:
-                f.write("\nStructure:\n")
-                for key, value in result['structure'].items():
-                    if key == 'total_pages':
-                        f.write(f"- {key}: {value}\n")
-                    else:
-                        f.write(f"- {key}: {'[YES]' if value else '[NO]'}\n")
-            
-            if 'text' in result:
-                f.write("\nText Accessibility:\n")
-                for key, value in result['text'].items():
-                    f.write(f"- {key}: {value}\n")
-            
+            f.write(f"File: {result['filename']}\n")
+            endpoint = result.get('url', 'Unknown location')  # Use 'Unknown location' if URL not found
+            f.write(f"Source URL: {endpoint}\n")
+            f.write(f"Compliance Status: {'[PASS] Compliant' if result['is_compliant'] else '[FAIL] Non-compliant'}\n")
             f.write("\n" + "=" * 50 + "\n")
 
 if __name__ == "__main__":
@@ -283,4 +262,4 @@ if __name__ == "__main__":
     checker = PDFAccessibilityChecker(args.dir)
     results = checker.check_directory()
     generate_report(results, args.report)
-    print(f"\nAccessibility report generated: {args.report}") 
+    print(f"\nAccessibility report generated: {args.report}")
