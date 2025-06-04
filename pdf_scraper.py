@@ -18,22 +18,18 @@ class PDFScraper:
     A class to scrape PDFs from websites.
     This scraper crawls through web pages up to a specified depth and downloads any PDF files it finds.
     """
-    
-    def __init__(self, base_url, output_dir="downloads", max_depth=2, timeout=30):
+    def __init__(self, base_url, output_dir="downloads", timeout=30):
         """
         Initialize the PDF scraper with the given parameters.
         
         Args:
             base_url (str): The starting URL to begin scraping from
             output_dir (str): Directory where PDFs will be saved (default: 'downloads')
-            max_depth (int): Maximum depth of pages to crawl (default: 2)
             timeout (int): Request timeout in seconds (default: 30)
         """
         self.base_url = base_url
         self.output_dir = output_dir
-        self.max_depth = max_depth
         self.timeout = timeout
-        self.visited_urls = set()  # Keep track of URLs we've already visited
         self.downloaded_pdfs = set()  # Keep track of PDFs we've already downloaded
         self.pdf_sources = {}  # Track the source URL of each downloaded PDF
         
@@ -148,19 +144,9 @@ class PDFScraper:
                 for data in response.iter_content(chunk_size=1024):
                     size = pdf_file.write(data)
                     pbar.update(size)
-            
-            # Mark as downloaded and log success
+              # Mark as downloaded and log success
             self.downloaded_pdfs.add(pdf_url)
             self.logger.info(f"Successfully downloaded: {pdf_name}")
-            
-            # Check accessibility after download
-            if hasattr(self, 'check_accessibility') and self.check_accessibility:
-                checker = PDFAccessibilityChecker(self.output_dir)
-                result = checker.check_single_pdf(pdf_path)
-                if not result['is_compliant']:
-                    self.logger.warning(f"{pdf_name} is not 508 compliant")
-                    for issue in result.get('issues', []):
-                        self.logger.warning(f"- {issue['rule']}: {issue['description']}")
             
             # Save the source URL of the downloaded PDF
             self.pdf_sources[pdf_name] = pdf_url
@@ -168,32 +154,18 @@ class PDFScraper:
             return pdf_path
         except Exception as e:
             self.logger.error(f"Error downloading PDF from {pdf_url}: {str(e)}")
-            return None
-
-    def scrape_page(self, url, depth=0):
+            return None    
+    def scrape_page(self, url):
         """
-        Recursively scrape a webpage for PDF links and other pages to crawl.
+        Scrape a webpage for PDF links.
         
         Args:
             url (str): The URL of the page to scrape
-            depth (int): Current depth in the crawling hierarchy
-            
-        The function:
-        - Checks depth limits and already visited pages
-        - Parses HTML content for links
-        - Downloads PDFs when found
-        - Recursively crawls valid pages
         """
         # Check robots.txt before scraping
         if not self.can_fetch(url):
             self.logger.warning(f"Skipping {url} as per robots.txt rules")
             return
-        
-        # Stop if we've reached max depth or already visited this URL
-        if depth > self.max_depth or url in self.visited_urls:
-            return
-        
-        self.visited_urls.add(url)
         
         try:
             # Get and parse the page content
@@ -202,20 +174,12 @@ class PDFScraper:
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Find and process all links on the page
+            # Find and process all PDF links on the page
             for link in soup.find_all('a'):
                 href = link.get('href')
-                if not href:
-                    continue
-                
-                # Convert relative URLs to absolute URLs
-                full_url = urljoin(url, href)
-                
-                # Handle PDFs and valid pages differently
-                if full_url.lower().endswith('.pdf'):
+                if href and href.lower().endswith('.pdf'):
+                    full_url = urljoin(url, href)
                     self.download_pdf(full_url)
-                elif self.is_valid_url(full_url):
-                    self.scrape_page(full_url, depth + 1)
                     
         except Exception as e:
             self.logger.error(f"Error scraping {url}: {str(e)}")
@@ -226,50 +190,23 @@ def main():
     Sets up argument parsing and initiates the scraping process.
     """
     # Set up command line argument parsing
-    parser = argparse.ArgumentParser(description='Web scraper for downloading PDFs from a website')
-    parser.add_argument('--url', required=True, help='The website URL to scrape')
+    parser = argparse.ArgumentParser(description='Simple PDF scraper with legal compliance')
+    parser.add_argument('--url', required=True, help='Website URL to scrape PDFs from')
     parser.add_argument('--output-dir', default='downloads', help='Directory to save PDFs')
-    parser.add_argument('--max-depth', type=int, default=2, help='Maximum crawling depth')
     parser.add_argument('--timeout', type=int, default=30, help='Request timeout in seconds')
-    parser.add_argument('--check-508', action='store_true', help='Check PDFs for 508 compliance')
-    parser.add_argument('--accessibility-report', default='accessibility_report.txt',
-                      help='Output file for accessibility report')
-    parser.add_argument('--respect-robots', action='store_true', default=True,
-                      help='Respect robots.txt rules (default: True)')
     
     args = parser.parse_args()
-    
-    # Create and configure the scraper
+      # Create and configure the scraper
     scraper = PDFScraper(
         args.url,
         output_dir=args.output_dir,
-        max_depth=args.max_depth,
         timeout=args.timeout
     )
-    
-    # Add accessibility checking flag
-    scraper.check_accessibility = args.check_508
     
     # Start the scraping process
     print(f"Starting to scrape PDFs from {args.url}")
     scraper.scrape_page(args.url)
     print(f"\nScraping completed! PDFs have been saved to: {args.output_dir}")
-    
-    # Generate accessibility report if requested
-    if args.check_508:
-        checker = PDFAccessibilityChecker(args.output_dir)
-        results = []
-        for pdf_file in os.listdir(args.output_dir):
-            if pdf_file.lower().endswith('.pdf'):
-                pdf_path = os.path.join(args.output_dir, pdf_file)
-                pdf_url = scraper.pdf_sources.get(pdf_file)
-                result = checker.check_single_pdf(pdf_path, source_url=pdf_url)
-                results.append(result)
-        
-        # Create report path in the same directory as PDFs
-        report_path = os.path.join(args.output_dir, 'accessibility_report.txt')
-        generate_report(results, report_path, source_url=args.url)
-        print(f"Accessibility report generated: {report_path}")
 
 if __name__ == "__main__":
     main()
