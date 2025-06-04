@@ -64,14 +64,30 @@ def process_directory(directory: str) -> List[Dict]:
         return []
 
 def generate_csv_report(results: List[Dict], output_file: str):
-    """Generate a CSV report of the results."""
-    fieldnames = ['filename', 'has_tags', 'page_count', 'error']
+    """Generate a formatted CSV report of the results."""
+    # Define columns and their display names
+    fieldnames = {
+        'filename': 'PDF Filename',
+        'has_tags': 'Tagged Status',
+        'page_count': 'Number of Pages',
+        'error': 'Error Messages'
+    }
     
     with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames.keys())
+        
+        # Write custom header with formatted column names
+        writer.writerow(fieldnames)
+        
+        # Write data with formatted values
         for result in results:
-            writer.writerow(result)
+            formatted_result = {
+                'filename': result['filename'],
+                'has_tags': 'Yes' if result['has_tags'] else 'No',
+                'page_count': str(result['page_count']) if result['page_count'] > 0 else 'N/A',
+                'error': result.get('error', 'None')
+            }
+            writer.writerow(formatted_result)
 
 def verify_drive_access(path: str) -> bool:
     """Verify if the drive is accessible and has necessary permissions."""
