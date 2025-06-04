@@ -26,13 +26,42 @@ def check_pdf_tagging(pdf_path: str) -> Dict:
 
 def process_directory(directory: str) -> List[Dict]:
     """Process all PDFs in the given directory."""
-    results = []
-    for filename in os.listdir(directory):
-        if filename.lower().endswith('.pdf'):
-            pdf_path = os.path.join(directory, filename)
-            result = check_pdf_tagging(pdf_path)
-            results.append(result)
-    return results
+    try:
+        # Ensure we have an absolute path
+        directory = os.path.abspath(directory)
+        
+        # Check if drive is accessible
+        drive = os.path.splitdrive(directory)[0]
+        if not os.path.exists(drive):
+            raise FileNotFoundError(f"Drive not found or not accessible: {drive}")
+        
+        # Comprehensive permission checks
+        if not os.path.exists(directory):
+            raise FileNotFoundError(f"Directory not found: {directory}")
+            
+        permissions_check = {
+            'read': os.access(directory, os.R_OK),
+            'write': os.access(directory, os.W_OK),
+            'execute': os.access(directory, os.X_OK)
+        }
+        
+        if not permissions_check['read']:
+            print(f"Permission check results for {directory}:")
+            print(f"Read: {'Yes' if permissions_check['read'] else 'No'}")
+            print(f"Write: {'Yes' if permissions_check['write'] else 'No'}")
+            print(f"Execute: {'Yes' if permissions_check['execute'] else 'No'}")
+            raise PermissionError(f"Insufficient permissions for directory: {directory}")
+            
+        results = []
+        for filename in os.listdir(directory):
+            if filename.lower().endswith('.pdf'):
+                pdf_path = os.path.join(directory, filename)
+                result = check_pdf_tagging(pdf_path)
+                results.append(result)
+        return results
+    except Exception as e:
+        print(f"Error processing directory {directory}: {e}")
+        return []
 
 def generate_csv_report(results: List[Dict], output_file: str):
     """Generate a CSV report of the results."""
@@ -43,6 +72,32 @@ def generate_csv_report(results: List[Dict], output_file: str):
         writer.writeheader()
         for result in results:
             writer.writerow(result)
+
+def verify_drive_access(path: str) -> bool:
+    """Verify if the drive is accessible and has necessary permissions."""
+    try:
+        drive = os.path.splitdrive(path)[0]
+        if not drive:
+            return True  # Relative path, use current drive
+            
+        if not os.path.exists(drive):
+            print(f"Drive not found: {drive}")
+            return False
+            
+        test_file = os.path.join(drive, 'test_access.tmp')
+        try:
+            # Try to write a temporary file
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            return True
+        except Exception as e:
+            print(f"Drive access error: {str(e)}")
+            return False
+            
+    except Exception as e:
+        print(f"Error checking drive access: {str(e)}")
+        return False
 
 def main():
     import argparse
