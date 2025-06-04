@@ -4,6 +4,8 @@ import os
 import csv
 from PyPDF2 import PdfReader
 from typing import List, Dict
+import openpyxl
+from openpyxl.styles import Font, PatternFill
 
 def check_pdf_tagging(pdf_path: str) -> Dict:
     """Check if a PDF file has tagging."""
@@ -89,6 +91,64 @@ def generate_csv_report(results: List[Dict], output_file: str):
             }
             writer.writerow(formatted_result)
 
+def generate_excel_report(results: List[Dict], output_file: str):
+    """Generate a formatted Excel report of the results."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "PDF Tag Report"
+
+    # Define columns and their display names
+    fieldnames = {
+        'filename': 'PDF Filename',
+        'has_tags': 'Tagged Status',
+        'page_count': 'Number of Pages',
+        'error': 'Error Messages'
+    }
+
+    # Style for headers
+    header_font = Font(bold=True)
+    header_fill = PatternFill(start_color='CCCCCC', end_color='CCCCCC', fill_type='solid')
+
+    # Write headers
+    for col, header in enumerate(fieldnames.values(), 1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+
+    # Write data
+    for row, result in enumerate(results, 2):
+        formatted_result = {
+            'filename': result['filename'],
+            'has_tags': 'Yes' if result['has_tags'] else 'No',
+            'page_count': result['page_count'] if result['page_count'] > 0 else 'N/A',
+            'error': result.get('error', 'None')
+        }
+        for col, field in enumerate(fieldnames.keys(), 1):
+            ws.cell(row=row, column=col, value=formatted_result[field])
+
+    # Adjust column widths
+    for col in ws.columns:
+        max_length = 0
+        column = col[0].column_letter
+        for cell in col:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = (max_length + 2)
+        ws.column_dimensions[column].width = adjusted_width
+
+    wb.save(output_file)
+
+def generate_report(results: List[Dict], output_file: str):
+    """Generate a report in either CSV or Excel format based on file extension."""
+    file_ext = os.path.splitext(output_file)[1].lower()
+    if file_ext == '.xlsx':
+        generate_excel_report(results, output_file)
+    else:  # Default to CSV
+        generate_csv_report(results, output_file)
+
 def verify_drive_access(path: str) -> bool:
     """Verify if the drive is accessible and has necessary permissions."""
     try:
@@ -120,13 +180,14 @@ def main():
     parser = argparse.ArgumentParser(description='Check PDFs for tagging')
     parser.add_argument('--dir', required=True, help='Directory containing PDFs to check')
     parser.add_argument('--output', default='pdf_tagging_report.csv', 
-                       help='Output CSV file (default: pdf_tagging_report.csv)')
+                       help='Output file (default: pdf_tagging_report.csv, use .xlsx extension for Excel format)')
     
     args = parser.parse_args()
     
     print(f"Processing PDFs in {args.dir}...")
     results = process_directory(args.dir)
-    generate_csv_report(results, args.output)
+    
+    generate_report(results, args.output)
     print(f"\nReport generated: {args.output}")
     
     # Print summary
