@@ -11,14 +11,16 @@ import logging  # For logging operations and errors
 from pdf_accessibility import PDFAccessibilityChecker, generate_report
 from urllib.robotparser import RobotFileParser
 import time
-from typing import Optional
+import certifi
+from typing import Optional, Set
+from collections import deque
 
 class PDFScraper:
     """
     A class to scrape PDFs from websites.
     This scraper crawls through web pages up to a specified depth and downloads any PDF files it finds.
     """
-    def __init__(self, base_url, output_dir="downloads", timeout=30):
+    def __init__(self, base_url, output_dir="downloads", timeout=30, verify_ssl=True, max_depth=3):
         """
         Initialize the PDF scraper with the given parameters.
         
@@ -26,10 +28,29 @@ class PDFScraper:
             base_url (str): The starting URL to begin scraping from
             output_dir (str): Directory where PDFs will be saved (default: 'downloads')
             timeout (int): Request timeout in seconds (default: 30)
+            verify_ssl (bool): Whether to verify SSL certificates (default: True)
+            max_depth (int): Maximum depth to crawl (default: 3)
         """
         self.base_url = base_url
+        self.base_domain = urlparse(base_url).netloc
         self.output_dir = output_dir
         self.timeout = timeout
+        self.verify_ssl = verify_ssl
+        self.max_depth = max_depth
+        self.session = requests.Session()
+        self.visited_urls: Set[str] = set()  # Track visited URLs
+        self.found_pdfs: Set[str] = set()    # Track found PDF URLs
+        
+        # Configure SSL verification
+        if verify_ssl:
+            self.session.verify = certifi.where()
+        else:
+            self.session.verify = False
+            # Disable SSL verification warnings if verify_ssl is False
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            self.logger.warning("SSL certificate verification is disabled. This is not recommended for production use.")
+
         self.downloaded_pdfs = set()  # Keep track of PDFs we've already downloaded
         self.pdf_sources = {}  # Track the source URL of each downloaded PDF
         
@@ -85,23 +106,43 @@ class PDFScraper:
             
             return can_fetch
         except Exception as e:
-            self.logger.error(f"Error checking robots.txt for {url}: {str(e)}")
+            self.logger.error(f"Error checking robots.txt for {url}: {str(e)}")            
             time.sleep(1)  # Conservative delay on error
             return True
-
-    def is_valid_url(self, url):
+            
+    def is_valid_url(self, url: str) -> bool:
         """
-        Check if a URL belongs to the same domain as the base URL.
-        This prevents the scraper from crawling external websites.
+        Check if a URL is valid for crawling.
         
         Args:
-            url (str): The URL to check
+            url (str): The URL to validate
             
         Returns:
-            bool: True if the URL is valid (same domain or relative), False otherwise
+            bool: True if the URL is valid (same domain, not mailto, etc.), False otherwise
         """
+        # Skip mailto: links and other email-related URLs
+        if url.startswith(('mailto:', 'tel:', 'sms:', 'fax:')):
+            return False
+            
+        # Parse the URL
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+            
+        # Skip if no domain (might be a javascript: link or other invalid URL)
+        if not parsed.netloc and not parsed.path:
+            return False
+            
+        # Skip email addresses in any form
+        if '@' in url:
+            return False
+            
+        # Check domain
         base_domain = urlparse(self.base_url).netloc
-        url_domain = urlparse(url).netloc
+        url_domain = parsed.netloc
+        
+        # Either should be same domain or a relative URL
         return base_domain in url_domain or not url_domain
 
     def download_pdf(self, pdf_url: str) -> Optional[str]:
@@ -127,8 +168,17 @@ class PDFScraper:
             
             # Start the download with streaming enabled for large files
             self.logger.info(f"Downloading: {pdf_name}")
-            response = requests.get(pdf_url, stream=True, timeout=self.timeout)
-            response.raise_for_status()  # Raise an exception for bad status codes
+            try:
+                response = self.session.get(pdf_url, stream=True, timeout=self.timeout)
+                response.raise_for_status()  # Raise an exception for bad status codes
+            except requests.exceptions.SSLError as ssl_err:
+                self.logger.error(f"SSL Error when downloading {pdf_url}: {str(ssl_err)}")
+                if self.verify_ssl:
+                    self.logger.warning("Consider using --no-verify-ssl if the site has a valid but unverifiable certificate")
+                return None
+            except requests.exceptions.RequestException as req_err:
+                self.logger.error(f"Request error when downloading {pdf_url}: {str(req_err)}")
+                return None
             
             # Get the file size for the progress bar
             total_size = int(response.headers.get('content-length', 0))
@@ -144,7 +194,8 @@ class PDFScraper:
                 for data in response.iter_content(chunk_size=1024):
                     size = pdf_file.write(data)
                     pbar.update(size)
-              # Mark as downloaded and log success
+            
+            # Mark as downloaded and log success
             self.downloaded_pdfs.add(pdf_url)
             self.logger.info(f"Successfully downloaded: {pdf_name}")
             
@@ -184,6 +235,104 @@ class PDFScraper:
         except Exception as e:
             self.logger.error(f"Error scraping {url}: {str(e)}")
 
+    def normalize_url(self, url: str) -> str:
+        """Normalize URL to avoid duplicates with different representations."""
+        parsed = urlparse(url)
+        # Remove fragments and normalize path
+        normalized = parsed._replace(fragment='').geturl()
+        return normalized.rstrip('/')
+
+    def extract_links(self, soup: BeautifulSoup, current_url: str) -> set:
+        """Extract all valid links from a BeautifulSoup object."""
+        links = set()
+        for link in soup.find_all('a', href=True):
+            href = link['href'].strip()
+            if not href:
+                continue
+                
+            # Skip email addresses and invalid URLs
+            if href.startswith('#') or href.startswith('javascript:'):
+                continue
+                
+            # Convert relative URLs to absolute
+            absolute_url = urljoin(current_url, href)
+            normalized_url = self.normalize_url(absolute_url)
+            
+            # Check if URL belongs to the same domain and hasn't been visited
+            if self.is_valid_url(normalized_url) and normalized_url not in self.visited_urls:
+                links.add(normalized_url)
+                
+        return links
+
+    def crawl(self):
+        """Crawl the website starting from base_url up to max_depth."""
+        # Queue of (url, depth) pairs to process
+        queue = deque([(self.base_url, 0)])
+        self.visited_urls.clear()
+        self.found_pdfs.clear()
+        
+        with tqdm(desc="Crawling URLs", unit="page") as pbar:
+            while queue:
+                current_url, depth = queue.popleft()
+                
+                # Skip if we've reached max depth or already visited
+                if depth > self.max_depth or current_url in self.visited_urls:
+                    continue
+                
+                # Mark as visited
+                self.visited_urls.add(current_url)
+                
+                try:
+                    # Check robots.txt before accessing
+                    if not self.can_fetch(current_url):
+                        continue
+                        
+                    # Fetch and parse the page
+                    response = self.session.get(current_url, timeout=self.timeout)
+                    response.raise_for_status()
+                    
+                    # Update progress
+                    pbar.update(1)
+                    pbar.set_postfix({"depth": depth, "queue": len(queue)})
+                    
+                    # Parse HTML
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # Extract and process PDF links
+                    self.process_pdf_links(soup, current_url)
+                    
+                    # If we haven't reached max depth, add new links to queue
+                    if depth < self.max_depth:
+                        new_links = self.extract_links(soup, current_url)
+                        for link in new_links:
+                            if link not in self.visited_urls:
+                                queue.append((link, depth + 1))
+                                
+                except Exception as e:
+                    self.logger.error(f"Error processing {current_url}: {str(e)}")
+                    continue
+        
+        # Print crawling summary
+        self.logger.info(f"\nCrawling completed:")
+        self.logger.info(f"Total pages visited: {len(self.visited_urls)}")
+        self.logger.info(f"Total PDFs found: {len(self.found_pdfs)}")
+        self.logger.info(f"Total PDFs downloaded: {len(self.downloaded_pdfs)}")
+
+    def process_pdf_links(self, soup: BeautifulSoup, source_url: str):
+        """Extract and process PDF links from a page."""
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            if not href:
+                continue
+                
+            # Convert relative URLs to absolute
+            pdf_url = urljoin(source_url, href)
+            
+            # Check if it's a PDF link
+            if pdf_url.lower().endswith('.pdf') and pdf_url not in self.found_pdfs:
+                self.found_pdfs.add(pdf_url)
+                self.download_pdf(pdf_url)
+
 def main():
     """
     Main entry point of the script.
@@ -194,18 +343,26 @@ def main():
     parser.add_argument('--url', required=True, help='Website URL to scrape PDFs from')
     parser.add_argument('--output-dir', default='downloads', help='Directory to save PDFs')
     parser.add_argument('--timeout', type=int, default=30, help='Request timeout in seconds')
+    parser.add_argument('--no-verify-ssl', action='store_true', 
+                      help='Disable SSL certificate verification (not recommended)')
+    parser.add_argument('--max-depth', type=int, default=3,
+                      help='Maximum depth to crawl (default: 3)')
     
     args = parser.parse_args()
-      # Create and configure the scraper
+    
+    # Create and configure the scraper
     scraper = PDFScraper(
         args.url,
         output_dir=args.output_dir,
-        timeout=args.timeout
+        timeout=args.timeout,
+        verify_ssl=not args.no_verify_ssl,
+        max_depth=args.max_depth
     )
     
     # Start the scraping process
-    print(f"Starting to scrape PDFs from {args.url}")
-    scraper.scrape_page(args.url)
+    print(f"Starting to crawl from {args.url}")
+    print(f"Maximum depth: {args.max_depth}")
+    scraper.crawl()
     print(f"\nScraping completed! PDFs have been saved to: {args.output_dir}")
 
 if __name__ == "__main__":
