@@ -31,6 +31,14 @@ class PDFScraper:
             verify_ssl (bool): Whether to verify SSL certificates (default: True)
             max_depth (int): Maximum depth to crawl (default: 3)
         """
+        # Set up logging configuration first
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        self.logger = logging.getLogger(__name__)
+
+        # Initialize core attributes
         self.base_url = base_url
         self.base_domain = urlparse(base_url).netloc
         self.output_dir = output_dir
@@ -38,8 +46,14 @@ class PDFScraper:
         self.verify_ssl = verify_ssl
         self.max_depth = max_depth
         self.session = requests.Session()
-        self.visited_urls: Set[str] = set()  # Track visited URLs
-        self.found_pdfs: Set[str] = set()    # Track found PDF URLs
+        
+        # Initialize tracking collections
+        self.visited_urls = set()         # URLs that have been crawled
+        self.found_pdfs = set()           # PDF URLs that have been found
+        self.downloaded_pdfs = set()      # PDF URLs that have been successfully downloaded
+        self.pdf_sources = {}             # Mapping of PDF filenames to their source URLs
+        self.failed_downloads = {}        # PDF URLs that failed to download and why
+        self.skipped_pdfs = {}           # PDF URLs that were skipped and why
         
         # Configure SSL verification
         if verify_ssl:
@@ -51,19 +65,9 @@ class PDFScraper:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             self.logger.warning("SSL certificate verification is disabled. This is not recommended for production use.")
 
-        self.downloaded_pdfs = set()  # Keep track of PDFs we've already downloaded
-        self.pdf_sources = {}  # Track the source URL of each downloaded PDF
-        
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
         
-        # Set up logging configuration
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s'
-        )
-        self.logger = logging.getLogger(__name__)
-
         # Set up robots.txt parser
         self.rp = RobotFileParser()
         self.setup_robots_parser()
@@ -150,6 +154,7 @@ class PDFScraper:
         try:
             # Check robots.txt before downloading
             if not self.can_fetch(pdf_url):
+                self.skipped_pdfs[pdf_url] = "Blocked by robots.txt"
                 self.logger.warning(f"Skipping {pdf_url} as per robots.txt rules")
                 return None
 
@@ -163,6 +168,7 @@ class PDFScraper:
             
             # Skip if we've already downloaded this PDF
             if pdf_url in self.downloaded_pdfs:
+                self.skipped_pdfs[pdf_url] = "Already downloaded"
                 self.logger.info(f"Skipping already downloaded PDF: {pdf_name}")
                 return pdf_path
             
@@ -171,12 +177,22 @@ class PDFScraper:
             try:
                 response = self.session.get(pdf_url, stream=True, timeout=self.timeout)
                 response.raise_for_status()  # Raise an exception for bad status codes
+                
+                # Verify content type is PDF
+                content_type = response.headers.get('content-type', '').lower()
+                if 'pdf' not in content_type and 'application/octet-stream' not in content_type:
+                    self.failed_downloads[pdf_url] = f"Invalid content type: {content_type}"
+                    self.logger.warning(f"Skipping non-PDF content type: {content_type} for {pdf_name}")
+                    return None
+
             except requests.exceptions.SSLError as ssl_err:
+                self.failed_downloads[pdf_url] = f"SSL Error: {str(ssl_err)}"
                 self.logger.error(f"SSL Error when downloading {pdf_url}: {str(ssl_err)}")
                 if self.verify_ssl:
                     self.logger.warning("Consider using --no-verify-ssl if the site has a valid but unverifiable certificate")
                 return None
             except requests.exceptions.RequestException as req_err:
+                self.failed_downloads[pdf_url] = f"Request Error: {str(req_err)}"
                 self.logger.error(f"Request error when downloading {pdf_url}: {str(req_err)}")
                 return None
             
@@ -195,6 +211,19 @@ class PDFScraper:
                     size = pdf_file.write(data)
                     pbar.update(size)
             
+            # Verify the downloaded file is actually a PDF
+            try:
+                with open(pdf_path, 'rb') as f:
+                    if not f.read(4).startswith(b'%PDF'):
+                        os.remove(pdf_path)
+                        self.failed_downloads[pdf_url] = "Not a valid PDF file"
+                        self.logger.warning(f"Removed invalid PDF file: {pdf_name}")
+                        return None
+            except Exception as e:
+                os.remove(pdf_path)
+                self.failed_downloads[pdf_url] = f"PDF verification failed: {str(e)}"
+                return None
+
             # Mark as downloaded and log success
             self.downloaded_pdfs.add(pdf_url)
             self.logger.info(f"Successfully downloaded: {pdf_name}")
@@ -204,8 +233,10 @@ class PDFScraper:
             
             return pdf_path
         except Exception as e:
+            self.failed_downloads[pdf_url] = f"Unexpected error: {str(e)}"
             self.logger.error(f"Error downloading PDF from {pdf_url}: {str(e)}")
-            return None    
+            return None
+
     def scrape_page(self, url):
         """
         Scrape a webpage for PDF links.
@@ -333,6 +364,26 @@ class PDFScraper:
                 self.found_pdfs.add(pdf_url)
                 self.download_pdf(pdf_url)
 
+    def print_summary(self):
+        """Print a detailed summary of the crawling and download results."""
+        self.logger.info("\nDetailed Crawling Summary:")
+        self.logger.info("-" * 50)
+        self.logger.info(f"Total pages visited: {len(self.visited_urls)}")
+        self.logger.info(f"Total PDFs found: {len(self.found_pdfs)}")
+        self.logger.info(f"Successfully downloaded: {len(self.downloaded_pdfs)}")
+        
+        if self.skipped_pdfs:
+            self.logger.info("\nSkipped PDFs:")
+            for url, reason in self.skipped_pdfs.items():
+                self.logger.info(f"- {os.path.basename(url)}: {reason}")
+        
+        if self.failed_downloads:
+            self.logger.info("\nFailed Downloads:")
+            for url, reason in self.failed_downloads.items():
+                self.logger.info(f"- {os.path.basename(url)}: {reason}")
+
+        self.logger.info("-" * 50)
+
 def main():
     """
     Main entry point of the script.
@@ -358,11 +409,11 @@ def main():
         verify_ssl=not args.no_verify_ssl,
         max_depth=args.max_depth
     )
-    
-    # Start the scraping process
+      # Start the scraping process
     print(f"Starting to crawl from {args.url}")
     print(f"Maximum depth: {args.max_depth}")
     scraper.crawl()
+    scraper.print_summary()
     print(f"\nScraping completed! PDFs have been saved to: {args.output_dir}")
 
 if __name__ == "__main__":
