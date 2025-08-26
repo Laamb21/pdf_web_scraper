@@ -487,6 +487,7 @@ class EnhancedPDFScraper(PDFScraper):
         super().__init__(base_url, output_dir, timeout, verify_ssl, max_depth)
         self.progress_callback = progress_callback
         self.stop_scraping = False
+        self.total_pages_discovered = 0  # Track total unique pages discovered
         
     def crawl(self):
         """Enhanced crawl method with progress reporting."""
@@ -496,6 +497,17 @@ class EnhancedPDFScraper(PDFScraper):
         queue = deque([(self.base_url, 0)])
         self.visited_urls.clear()
         self.found_pdfs.clear()
+        self.total_pages_discovered = 1  # Start with the base URL
+        
+        # Initial progress report
+        if self.progress_callback:
+            self.progress_callback('stats', {
+                'pages_crawled': 0,
+                'pages_found': self.total_pages_discovered,
+                'pdfs_found': 0,
+                'pdfs_downloaded': 0,
+                'current_activity': 'Starting crawl...'
+            })
         
         while queue and not self.stop_scraping:
             current_url, depth = queue.popleft()
@@ -507,24 +519,29 @@ class EnhancedPDFScraper(PDFScraper):
             # Mark as visited
             self.visited_urls.add(current_url)
             
-            # Report progress
+            # Report progress with correct counts
             if self.progress_callback:
                 self.progress_callback('stats', {
                     'pages_crawled': len(self.visited_urls),
-                    'pages_found': len(self.visited_urls) + len(queue),
+                    'pages_found': self.total_pages_discovered,
                     'pdfs_found': len(self.found_pdfs),
                     'pdfs_downloaded': len(self.downloaded_pdfs),
                     'current_activity': f'Crawling: {current_url[:50]}...'
                 })
                 
                 self.progress_callback('log', {
-                    'message': f'Crawling page: {current_url}',
+                    'message': f'Crawling page ({len(self.visited_urls)}/{self.total_pages_discovered}): {current_url}',
                     'level': 'info'
                 })
             
             try:
                 # Check robots.txt before accessing
                 if not self.can_fetch(current_url):
+                    if self.progress_callback:
+                        self.progress_callback('log', {
+                            'message': f'Skipped by robots.txt: {current_url}',
+                            'level': 'warning'
+                        })
                     continue
                     
                 # Fetch and parse the page
@@ -541,9 +558,20 @@ class EnhancedPDFScraper(PDFScraper):
                 # If we haven't reached max depth, add new links to queue
                 if depth < self.max_depth:
                     new_links = self.extract_links(soup, current_url)
+                    new_unique_links = 0
                     for link in new_links:
-                        if link not in self.visited_urls:
+                        if link not in self.visited_urls and not any(url for url, _ in queue if url == link):
                             queue.append((link, depth + 1))
+                            new_unique_links += 1
+                    
+                    # Update total discovered pages count
+                    if new_unique_links > 0:
+                        self.total_pages_discovered += new_unique_links
+                        if self.progress_callback:
+                            self.progress_callback('log', {
+                                'message': f'Found {new_unique_links} new pages to crawl',
+                                'level': 'info'
+                            })
                             
             except Exception as e:
                 if self.progress_callback:
@@ -557,77 +585,152 @@ class EnhancedPDFScraper(PDFScraper):
         if self.progress_callback:
             self.progress_callback('stats', {
                 'pages_crawled': len(self.visited_urls),
-                'pages_found': len(self.visited_urls),
+                'pages_found': self.total_pages_discovered,
                 'pdfs_found': len(self.found_pdfs),
                 'pdfs_downloaded': len(self.downloaded_pdfs),
                 'current_activity': 'Completed'
             })
     
     def enhanced_pdf_detection(self, soup, source_url):
-        """Enhanced PDF detection supporting multiple embedding methods."""
+        """Enhanced PDF detection supporting multiple embedding methods and content-type checking."""
         from urllib.parse import urljoin
+        import requests
         
-        # Direct links
+        # Collect all potential PDF URLs
+        potential_pdfs = []
+        
+        # 1. Direct links ending with .pdf
         for link in soup.find_all('a', href=True):
             href = link['href']
             if href.lower().endswith('.pdf'):
                 pdf_url = urljoin(source_url, href)
-                self.process_pdf_url(pdf_url, source_url, 'direct link')
+                potential_pdfs.append((pdf_url, 'direct link (.pdf)', link.get_text().strip()))
         
-        # Embedded PDFs
+        # 2. Links that might be PDFs based on content or query parameters
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            link_text = link.get_text().strip().lower()
+            
+            # Skip if already found as direct PDF
+            if href.lower().endswith('.pdf'):
+                continue
+                
+            # Check for PDF indicators in URL or link text
+            pdf_indicators = ['pdf', 'download', 'report', 'document', 'file']
+            url_has_pdf = any(indicator in href.lower() for indicator in pdf_indicators)
+            text_has_pdf = any(indicator in link_text for indicator in pdf_indicators)
+            
+            if url_has_pdf or text_has_pdf or link_text.endswith('.pdf'):
+                pdf_url = urljoin(source_url, href)
+                potential_pdfs.append((pdf_url, 'potential PDF link', link_text))
+        
+        # 3. Embedded PDFs
         for embed in soup.find_all('embed', src=True):
             src = embed['src']
             if src.lower().endswith('.pdf') or 'pdf' in src.lower():
                 pdf_url = urljoin(source_url, src)
-                self.process_pdf_url(pdf_url, source_url, 'embed')
+                potential_pdfs.append((pdf_url, 'embed', ''))
         
-        # Object tags
+        # 4. Object tags
         for obj in soup.find_all('object', data=True):
             data = obj['data']
             if data.lower().endswith('.pdf') or 'pdf' in data.lower():
                 pdf_url = urljoin(source_url, data)
-                self.process_pdf_url(pdf_url, source_url, 'object')
+                potential_pdfs.append((pdf_url, 'object', ''))
         
-        # Iframe sources
+        # 5. Iframe sources
         for iframe in soup.find_all('iframe', src=True):
             src = iframe['src']
             if src.lower().endswith('.pdf') or 'pdf' in src.lower():
                 pdf_url = urljoin(source_url, src)
-                self.process_pdf_url(pdf_url, source_url, 'iframe')
+                potential_pdfs.append((pdf_url, 'iframe', ''))
         
-        # Cloud storage patterns (basic detection)
+        # 6. Cloud storage patterns
         for link in soup.find_all('a', href=True):
             href = link['href']
             if any(pattern in href.lower() for pattern in ['drive.google.com', 'dropbox.com', 'onedrive']):
                 if 'pdf' in href.lower() or link.get_text().lower().endswith('.pdf'):
-                    self.process_pdf_url(href, source_url, 'cloud storage')
+                    potential_pdfs.append((href, 'cloud storage', link.get_text().strip()))
+        
+        # Process all potential PDFs
+        for pdf_url, detection_method, link_text in potential_pdfs:
+            self.process_pdf_url(pdf_url, source_url, detection_method, link_text)
     
-    def process_pdf_url(self, pdf_url, source_url, detection_method):
-        """Process a detected PDF URL."""
-        if pdf_url not in self.found_pdfs:
-            self.found_pdfs.add(pdf_url)
+    def process_pdf_url(self, pdf_url, source_url, detection_method, link_text=""):
+        """Process a detected PDF URL with content-type verification."""
+        if pdf_url in self.found_pdfs:
+            return
             
-            if self.progress_callback:
-                self.progress_callback('log', {
-                    'message': f'Found PDF ({detection_method}): {pdf_url}',
-                    'level': 'info'
-                })
+        # Add to found PDFs immediately to avoid duplicates
+        self.found_pdfs.add(pdf_url)
+        
+        if self.progress_callback:
+            self.progress_callback('log', {
+                'message': f'Found potential PDF ({detection_method}): {pdf_url}' + (f' - "{link_text}"' if link_text else ''),
+                'level': 'info'
+            })
+        
+        # For non-direct PDF links, verify content type
+        is_confirmed_pdf = pdf_url.lower().endswith('.pdf')
+        
+        if not is_confirmed_pdf and detection_method == 'potential PDF link':
+            try:
+                # Make a HEAD request to check content type
+                head_response = self.session.head(pdf_url, timeout=10, allow_redirects=True)
+                content_type = head_response.headers.get('content-type', '').lower()
+                content_disposition = head_response.headers.get('content-disposition', '').lower()
                 
-                self.progress_callback('stats', {
-                    'pages_crawled': len(self.visited_urls),
-                    'pages_found': len(self.visited_urls),
-                    'pdfs_found': len(self.found_pdfs),
-                    'pdfs_downloaded': len(self.downloaded_pdfs),
-                    'current_activity': f'Downloading: {os.path.basename(pdf_url)}'
-                })
+                if 'pdf' in content_type or 'pdf' in content_disposition:
+                    is_confirmed_pdf = True
+                    if self.progress_callback:
+                        self.progress_callback('log', {
+                            'message': f'Confirmed PDF by content-type: {pdf_url}',
+                            'level': 'success'
+                        })
+                else:
+                    if self.progress_callback:
+                        self.progress_callback('log', {
+                            'message': f'Not a PDF (content-type: {content_type}): {pdf_url}',
+                            'level': 'warning'
+                        })
+                    return
+                    
+            except Exception as e:
+                if self.progress_callback:
+                    self.progress_callback('log', {
+                        'message': f'Could not verify content-type for {pdf_url}: {str(e)}',
+                        'level': 'warning'
+                    })
+                # If we can't verify, skip it unless it's a direct .pdf link
+                if not pdf_url.lower().endswith('.pdf'):
+                    return
+        
+        # Update progress before downloading
+        if self.progress_callback:
+            self.progress_callback('stats', {
+                'pages_crawled': len(self.visited_urls),
+                'pages_found': self.total_pages_discovered,
+                'pdfs_found': len(self.found_pdfs),
+                'pdfs_downloaded': len(self.downloaded_pdfs),
+                'current_activity': f'Downloading: {os.path.basename(pdf_url)}'
+            })
+        
+        # Download the PDF
+        result = self.download_pdf(pdf_url)
+        if result and self.progress_callback:
+            self.progress_callback('log', {
+                'message': f'Successfully downloaded: {os.path.basename(result)}',
+                'level': 'success'
+            })
             
-            # Download the PDF
-            result = self.download_pdf(pdf_url)
-            if result and self.progress_callback:
-                self.progress_callback('log', {
-                    'message': f'Successfully downloaded: {os.path.basename(result)}',
-                    'level': 'success'
-                })
+            # Update download count
+            self.progress_callback('stats', {
+                'pages_crawled': len(self.visited_urls),
+                'pages_found': self.total_pages_discovered,
+                'pdfs_found': len(self.found_pdfs),
+                'pdfs_downloaded': len(self.downloaded_pdfs),
+                'current_activity': f'Downloaded: {os.path.basename(result)}'
+            })
 
 
 def main():
