@@ -3,6 +3,7 @@
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
+from collections import defaultdict
 
 def crawl_site(start_url):
     '''
@@ -13,7 +14,7 @@ def crawl_site(start_url):
     visited = set()                         # To avoid duplicates 
     to_visit = [start_url]                  # Start with given URL
     domain = urlparse(start_url).netloc     # Extract domain
-    total_links = 0                         # Counter for total links found
+    totals = defaultdict(int)               # Counters for each content type
 
     while to_visit:
         url = to_visit.pop(0)      # Get next URL
@@ -28,12 +29,13 @@ def crawl_site(start_url):
             print(f"Failed to fetch {url}: {e}")
             continue
 
-        # Increment total links count 
-        total_links += 1
+        # Count every link 
+        totals["ALL"] += 1
 
         # Decide what to print based on content type 
         if content_type == "text/html":
             print(f"Found HTML page: {url}")
+            totals["HTML"] += 1
             # Parse links inside HTML pages only
             try:
                 soup = BeautifulSoup(response.text, "html.parser")
@@ -47,34 +49,51 @@ def crawl_site(start_url):
 
         elif content_type == "application/pdf":
             print(f"Found PDF: {url}")
+            totals["PDF"] += 1
         elif content_type in ["application/msword", "application/vnd/openxmlformats-officedocument.wordprocessingml.document"]:
             print(f"Found Word document: {url}")
+            totals["Word"] += 1
         elif content_type in ["application/vnd.ms-excel, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
             print(f"Found Excel file: {url}")
+            totals["Excel"] += 1
         elif content_type in ["application/vnd.ms-powerpoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation"]:
             print(f"Found PowerPoint file: {url}")
+            totals["PowerPoint"] += 1
         elif content_type.startswith("image/"):
             print(f"Found Image ({content_type}): {url}")
+            totals["Images"] += 1
         elif content_type.startswith("video/"):
             print(f"Found Video ({content_type}): {url}")
+            totals["Videos"] += 1
         elif content_type.startswith("audio/"):
             print(f"Found Audio ({content_type}): {url}")
+            totals["Audio"] += 1
         elif content_type in ["application/json"]:
             print(f"Found JSON data: {url}")
+            totals["JSON"] += 1
         elif content_type in ["application/xml", "text/xml"]:
             print(f"Found XML data: {url}")
+            totals["XML"] += 1
         elif content_type in ["application/javascript", "text/javascript"]:
             print(f"Found JavaScript file: {url}")
+            totals["JavaScript"] += 1
         elif content_type == "text/css":
             print(f"Found CSS file: {url}")
+            totals["CSS"] += 1
         elif content_type in ["application/zip", "application/x-tar", "application/gzip"]:
             print(f"Found Archive: ({content_type}): {url}")
+            totals["Archives"] += 1
         elif content_type == "application/octet-stream":
             print(f"Found Binary file: {url}")
+            totals["Binary"] += 1
         else:
             print(f"Found Other ({content_type}): {url}")
+            totals["Other"] += 1
 
-    print(f"\n Crawl finished. Total links found: {total_links}")
+    # Final summary
+    print("\nCrawl finished. Totals:")
+    for key, count in totals.items():
+        print(f"- {key}: {count}")
 
 if __name__ == "__main__":
     website = input("Enter a website URL (e.g. https://example.com): ").strip()
