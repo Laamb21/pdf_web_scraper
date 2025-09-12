@@ -5,6 +5,16 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 from collections import defaultdict
 
+def same_site(url, base_url, allow_subdomains=True):
+    def root(host):
+        host = host.lower()
+        return host[4:] if host.startswith("www.") else host
+    nu = root(urlparse(url).netloc)
+    nb = root(urlparse(base_url).netloc)
+    if not allow_subdomains:
+        return nu == nb
+    return (nu == nb) or nu.endswith("." + nb)
+
 def crawl_site(start_url):
     '''
     Crawl all pages of a website starting from the start_url.
@@ -13,8 +23,10 @@ def crawl_site(start_url):
 
     visited = set()                         # To avoid duplicates 
     to_visit = [start_url]                  # Start with given URL
-    domain = urlparse(start_url).netloc     # Extract domain
     totals = defaultdict(int)               # Counters for each content type
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": "SiteCrawler/1.0 (+https://example.com)"})
 
     while to_visit:
         url = to_visit.pop(0)      # Get next URL
@@ -23,7 +35,7 @@ def crawl_site(start_url):
         visited.add(url)
 
         try:
-            response = requests.get(url, timeout=5, stream=True)
+            response = requests.get(url, timeout=10, stream=True)
             content_type = response.headers.get("Content-Type", "").split(";")[0]
         except Exception as e:
             print(f"Failed to fetch {url}: {e}")
@@ -42,7 +54,7 @@ def crawl_site(start_url):
                 for link in soup.find_all("a", href=True):
                     new_url = urljoin(url, link["href"]) # Handle relative URLs
                     # Stay within the same domain
-                    if urlparse(new_url).netloc == domain and new_url not in visited:
+                    if same_site(new_url, start_url) and new_url not in visited:
                         to_visit.append(new_url)
             except Exception as e:
                 print(f"Failed to parse HTML at {url}: {e}")
